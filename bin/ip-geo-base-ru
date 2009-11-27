@@ -1,0 +1,226 @@
+#!/usr/bin/env perl
+
+use 5.008;
+use strict;
+use warnings;
+
+use Getopt::Long;
+
+my %db = (
+    dsn   => '',
+    user  => '',
+    pass  => '',
+    table => 'ip_geo_base_ru',
+);
+my %url = (
+    main        => 'http://ipgeobase.ru/files/db/Main/db_files.tar.gz',
+    coordinates => 'http://ipgeobase.ru/files/db/Map_db/block_coord.tar.gz',
+);
+my %opt = (
+    help        => 0,
+    create      => 0,
+    coordinates => 1,
+);
+
+GetOptions(
+    'h|help!'              => \$opt{'help'},
+    'd|dsn=s'              => \$db{'dsn'},
+    'u|user=s'             => \$db{'user'},
+    'p|password=s'         => \$db{'pass'},
+    't|table=s'            => \$db{'table'},
+    'source=s'             => \$url{'main'},
+    'coordinates-source=s' => \$url{'coordinates'},
+    'create!'              => \$opt{'create'},
+    'coordinates!'         => \$opt{'coordinates'},
+);
+
+if ( !$db{'dsn'} || $opt{'help'} ) {
+    require Pod::Usage;
+    Pod::Usage::pod2usage(
+        -message => "",
+        -exitval => $opt{'help'}? 0 : 1,
+        -verbose => 99,
+        -sections => $opt{'help'}? 'NAME|USAGE|DESCRIPTION|OPTIONS' : 'NAME|USAGE',
+    );
+}
+
+=head1 NAME
+
+ip-geo-base-ru - retrieve DBs from ipgeobase.ru and import them into DB
+
+=head1 USAGE
+
+    ip-geo-base-ru -h
+    ip-geo-base-ru --dsn 'dbi:SQLite:/path/to/my.db' --create
+    ip-geo-base-ru --dsn 'dbi:SQLite:/path/to/my.db'
+
+    ip-geo-base-ru [-d,--dsn <dsn>]
+        [-u,--user <db user>] [-p,--password <db password>]
+        [-t,--table <db table>] [--create]
+        [--source <URL>]
+        [--coordinates-source] [--nocoordinates]
+
+=head1 DESCRIPTION
+
+Script fetches information about IP blocks and its locations from
+http://ipgeobase.ru and imports data into a database table.
+
+=head1 OPTIONS
+
+=over 4
+
+=item * -h, --help - show help and exit
+
+=item * -d, --dsn - the only mandatory option - data base connection
+string. Syntax described in L</DBI>, example 'dbi:mysql:mydb'.
+
+=item * -u, --user, -p, --password - credentials that should be
+used to connect to the DB. Default values are empty.
+
+=item * -t, --table - name of the table in the database where data
+should be stored, default value is 'ip_geo_base_ru'.
+
+=item * --create - use this to create table in the DB for the first
+time.
+
+=item * --source, --coordinates-source - URLs of the files on
+the site.
+
+=item * --nocoordinates - don't import/update coordinates in
+the DB. Coordinates are in separate file, so it takes a while to
+update them. Columns are created in any case, so you can change
+this option any time you like.
+
+=back
+
+=cut
+
+require File::Spec;
+
+my ($master, $slave, $coord) = fetch();
+
+require Geo::IP::RU::IpGeoBase;
+my $api = Geo::IP::RU::IpGeoBase->new(
+    db => \%db,
+);
+$api->create_table if $opt{'create'};;
+
+my $table = $api->db_info->{'quoted_table'};
+$api->dbh->do("UPDATE $table SET in_update = 1");
+process_master($master);
+process_master($slave);
+process_coordinates($coord) if $coord;
+$api->dbh->do("DELETE FROM $table WHERE in_update = 1");
+
+sub process_master {
+    my $file = shift;
+
+    open my $fh, '<:encoding(cp1251)', $file
+        or die "Couldn't open $file";
+    
+    while ( my $str = <$fh> ) {
+        chomp $str;
+
+        my %rec;
+        @rec{qw(istart iend block country city region federal_district status)}
+            = split /\t/, $str;
+        delete $rec{'country'};
+
+        update( \%rec );
+    }
+    close $fh;
+}
+
+sub process_coordinates {
+    my $file = shift;
+
+    open my $fh, '<:encoding(cp1251)', $file
+        or die "Couldn't open $file";
+    
+    while ( my $str = <$fh> ) {
+        chomp $str;
+
+        my %rec;
+        @rec{qw(block istart iend city region federal_district latitude longitude)}
+            = split /\t/, $str;
+        my (@tmp) = delete @rec{qw(block city region federal_district)};
+
+        $api->update_record( %rec, in_update => 0 );
+    }
+    close $fh;
+}
+
+sub update {
+    my $rec = shift;
+
+    @{$rec}{'start', 'end'} = split_block( delete $rec->{'block'} )
+        if $rec->{'block'};
+
+    if ( $opt{'create'} ) {
+        return $api->insert_record( %$rec, in_update => 0 );
+    }
+    elsif ( $api->fetch_record( $rec->{'istart'}, $rec->{'iend'} ) ) {
+        return $api->update_record( %$rec, in_update => 0 );
+    }
+    else {
+        return $api->insert_record( %$rec, in_update => 0 );
+    }
+}
+
+sub split_block { return split /\s*-\s*/, $_[0], 2; }
+
+exit 0;
+
+sub fetch {
+    my @files = extract( fetch_file( $url{'main'} ) );
+    unless ( grep $_ eq 'cidr_ru_master_index.db', @files ) {
+        die "Couldn't find slave DB";
+    }
+    unless ( grep $_ eq 'cidr_ru_slave_index.db', @files ) {
+        die "Couldn't find slave DB";
+    }
+    my $master = File::Spec->catfile( tmp_dir(), 'cidr_ru_master_index.db' );
+    my $slave = File::Spec->catfile( tmp_dir(), 'cidr_ru_slave_index.db' );
+    return ($master, $slave) unless $opt{'coordinates'};
+
+    @files = extract( fetch_file( $url{'coordinates'} ) );
+    unless ( grep $_ eq 'block_coord.db', @files ) {
+        die "Couldn't find coordinates file";
+    }
+    my $coord = File::Spec->catfile( tmp_dir(), 'block_coord.db' );
+    return ($master, $slave, $coord);
+}
+
+sub extract {
+    my $file = shift;
+    require Archive::Extract;
+    my $ae = Archive::Extract->new( archive => $file );
+    return $file unless $ae;
+    $ae->extract( to => tmp_dir() ) or die $ae->error;
+    return @{ $ae->files };
+}
+
+sub fetch_file {
+    my $url = shift;
+
+    my ($file) = ($url =~ m{/([^/]+)$});
+    die "couldn't figure file name from $url" unless $file;
+
+    my $path = File::Spec->catfile( tmp_dir(), $file );
+
+    require LWP::Simple;
+    my $status = LWP::Simple::getstore($url, $path);
+    die "Couldn't get '$url': $status"
+        unless $status == 200;
+
+    return $path;
+}
+
+my $tmp_dir;
+sub tmp_dir {
+    return $tmp_dir if $tmp_dir;
+
+    require File::Temp;
+    return $tmp_dir = File::Temp->newdir( CLEANUP => 1 );
+}
+
