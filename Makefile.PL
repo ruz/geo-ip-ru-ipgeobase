@@ -9,5 +9,8 @@ requires     'Encode';
 requires     'File::Spec';
 requires     'File::Temp';
 requires     'Getopt::Long';
+requires     'LWP::Simple';
+
+install_script 'bin/ip-geo-base-ru';
 
 WriteAll;

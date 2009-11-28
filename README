@@ -11,7 +11,7 @@ DESCRIPTION
     import data into a database. Use command line utility to create and
     update back-end DB.
 
-    At this moment DB can be created in SQLite and mysql only. If you create
+    At this moment DB can be created in SQLite, mysql and Pg. If you create
     table manually then probably module will just work. It's very easy to
     add support for more back-end DBs. Patches are welcome.
 
