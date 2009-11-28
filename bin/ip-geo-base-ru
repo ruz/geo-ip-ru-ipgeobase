@@ -20,10 +20,12 @@ my %opt = (
     help        => 0,
     create      => 0,
     coordinates => 1,
+    verbose     => 0,
 );
 
 GetOptions(
     'h|help!'              => \$opt{'help'},
+    'v|verbose!'           => \$opt{'verbose'},
     'd|dsn=s'              => \$db{'dsn'},
     'u|user=s'             => \$db{'user'},
     'p|password=s'         => \$db{'pass'},
@@ -97,13 +99,16 @@ this option any time you like.
 
 require File::Spec;
 
-my ($master, $slave, $coord) = fetch();
-
 require Geo::IP::RU::IpGeoBase;
 my $api = Geo::IP::RU::IpGeoBase->new(
     db => \%db,
 );
-$api->create_table if $opt{'create'};;
+if ( $opt{'create'} ) {
+    print "Going to create a table\n" if $opt{'verbose'};
+    $api->create_table;
+}
+
+my ($master, $slave, $coord) = fetch();
 
 my $table = $api->db_info->{'quoted_table'};
 $api->dbh->do("UPDATE $table SET in_update = 1");
@@ -114,6 +119,8 @@ $api->dbh->do("DELETE FROM $table WHERE in_update = 1");
 
 sub process_master {
     my $file = shift;
+
+    print "Going to process '$file'" if $opt{'verbose'};
 
     open my $fh, '<:encoding(cp1251)', $file
         or die "Couldn't open $file";
@@ -126,13 +133,15 @@ sub process_master {
             = split /\t/, $str;
         delete $rec{'country'};
 
-        update( \%rec );
+        my $res = update( \%rec );
     }
     close $fh;
 }
 
 sub process_coordinates {
     my $file = shift;
+
+    print "Going to process '$file'" if $opt{'verbose'};
 
     open my $fh, '<:encoding(cp1251)', $file
         or die "Couldn't open $file";
@@ -157,17 +166,21 @@ sub update {
         if $rec->{'block'};
 
     if ( $opt{'create'} ) {
+        print "Inserting block $rec->{start} - $rec->{end}\n" if $opt{'verbose'};
         return $api->insert_record( %$rec, in_update => 0 );
     }
     elsif ( $api->fetch_record( $rec->{'istart'}, $rec->{'iend'} ) ) {
+        print "Updating block $rec->{start} - $rec->{end}\n" if $opt{'verbose'};
         return $api->update_record( %$rec, in_update => 0 );
     }
     else {
+        print "Inserting block $rec->{start} - $rec->{end}\n" if $opt{'verbose'};
         return $api->insert_record( %$rec, in_update => 0 );
     }
 }
 
 sub split_block { return split /\s*-\s*/, $_[0], 2; }
+
 
 exit 0;
 
@@ -193,10 +206,16 @@ sub fetch {
 
 sub extract {
     my $file = shift;
+
+    print "Going to extract archive '$file'\n" if $opt{'verbose'};
+
     require Archive::Extract;
     my $ae = Archive::Extract->new( archive => $file );
     return $file unless $ae;
     $ae->extract( to => tmp_dir() ) or die $ae->error;
+
+    print "Done\n" if $opt{'verbose'};
+
     return @{ $ae->files };
 }
 
@@ -208,11 +227,13 @@ sub fetch_file {
 
     my $path = File::Spec->catfile( tmp_dir(), $file );
 
+    print "Going to fetch '$url'\n" if $opt{'verbose'};
     require LWP::Simple;
     my $status = LWP::Simple::getstore($url, $path);
     die "Couldn't get '$url': $status"
         unless $status == 200;
 
+    print "Fetched to '$path'\n" if $opt{'verbose'};
     return $path;
 }
 
@@ -221,6 +242,9 @@ sub tmp_dir {
     return $tmp_dir if $tmp_dir;
 
     require File::Temp;
-    return $tmp_dir = File::Temp->newdir( CLEANUP => 1 );
+    $tmp_dir = File::Temp->newdir( CLEANUP => 1 );
+    print "Temporary directory is '$tmp_dir'\n" if $opt{'verbose'};
+
+    return $tmp_dir;
 }
 
