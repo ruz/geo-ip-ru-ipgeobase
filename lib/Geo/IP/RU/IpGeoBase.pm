@@ -111,8 +111,9 @@ latitude and longitude.
 
 sub find_by_ip {
     my $self = shift;
-    my $ip = $self->ip2int(shift);
-    return $self->intersections( $ip, $ip, order => 'ASC', @_ );
+    my $ip = shift or die 'No IP provided';
+    my $int = $self->ip2int($ip);
+    return $self->intersections( $int, $int, order => 'ASC', @_ );
 }
 
 sub ip2int { return unpack 'N', pack 'C4', split /[.]/, $_[1] }
@@ -122,7 +123,7 @@ sub intersections {
     my ($istart, $iend, %rest) = @_;
     my $table = $self->db_info->{'quoted_table'};
     my $dbh = $self->dbh;
-    my $query = "SELECT * FROM $table WHERE istart <= ? AND iend >= ?"
+    my $query = "SELECT * FROM $table WHERE "
         . $dbh->quote_identifier('istart') .' <= '. $dbh->quote($iend)
         .' AND '. $dbh->quote_identifier('iend') .' >= '. $dbh->quote($istart);
     $query .= ' ORDER BY iend - istart '. $rest{'order'}
@@ -194,14 +195,16 @@ sub delete_record {
 }
 
 sub decode {
-    return $_[1] unless $_[0]->{'db'}{'decode'};
-    return $_[1] unless defined $_[1];
+    my $self = shift;
+    my $value = shift;
+    return $value unless $self->{'db'}{'decode'};
+    return $value unless defined $value;
 
-    my $decoder = $_[0]->{'db'}{'decoder'};
-    foreach my $r ( ref($_[1]) eq 'ARRAY'? @$_[1] : $_[1] ) {
-        $_ = $decoder->decode($_) foreach grep defined, values %$r;
+    my $decoder = $self->{'db'}{'decoder'};
+    foreach my $rec ( ref($value) eq 'ARRAY'? (@$value) : ($value) ) {
+        $_ = $decoder->decode($_) foreach grep defined, values %$rec;
     }
-    return $_[1];
+    return $value;
 }
 
 sub db_info { return $_[0]->{'db'} }
