@@ -1,3 +1,9 @@
+0.02 2009-12-07
+
+    * solve conflicts in the DB file
+    * use coordinates file for primary import
+    * don't insert overlapping networks
+
 0.01 2009-11-29
 
     * initial release for review
