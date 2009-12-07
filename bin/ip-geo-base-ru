@@ -19,8 +19,8 @@ my %url = (
 my %opt = (
     help        => 0,
     create      => 0,
-    coordinates => 1,
     verbose     => 0,
+    split       => 0,
 );
 
 GetOptions(
@@ -33,7 +33,7 @@ GetOptions(
     'source=s'             => \$url{'main'},
     'coordinates-source=s' => \$url{'coordinates'},
     'create!'              => \$opt{'create'},
-    'coordinates!'         => \$opt{'coordinates'},
+    'split=i'              => \$opt{'split'},
 );
 
 if ( !$db{'dsn'} || $opt{'help'} ) {
@@ -60,7 +60,7 @@ ip-geo-base-ru - retrieve DBs from ipgeobase.ru and import them into DB
         [-u,--user <db user>] [-p,--password <db password>]
         [-t,--table <db table>] [--create]
         [--source <URL>]
-        [--coordinates-source] [--nocoordinates]
+        [--coordinates-source]
 
 =head1 DESCRIPTION
 
@@ -88,15 +88,18 @@ time.
 =item * --source, --coordinates-source - URLs of the files on
 the site.
 
-=item * --nocoordinates - don't import/update coordinates in
-the DB. Coordinates are in separate file, so it takes a while to
-update them. Columns are created in any case, so you can change
-this option any time you like.
-
 =back
 
 =cut
 
+if ( $opt{'split'} ) {
+    my $t = 32 - $opt{'split'};
+    my $size = 1;
+    $size <<= 1 while $t-- > 0;
+    $opt{'split_size'} = $size;
+}
+
+use Data::Dumper;
 require File::Spec;
 
 require Geo::IP::RU::IpGeoBase;
@@ -110,60 +113,240 @@ if ( $opt{'create'} ) {
 
 my ($master, $slave, $coord) = fetch();
 
+my @equality_fields = qw(latitude longitude);
+my @master_fields = qw(istart iend block country city region federal_district master_line master_length);
+my @slave_fields  = qw(istart iend block country city region federal_district);
+my @coords_fields = qw(block istart iend city region federal_district latitude longitude);
+
 my $table = $api->db_info->{'quoted_table'};
 $api->dbh->do("UPDATE $table SET in_update = 1");
-process_master($master);
-process_master($slave);
-process_coordinates($coord) if $coord;
+process_leading($coord, \@coords_fields);
+process_suplimentary($master, \@master_fields);
+process_suplimentary($slave, \@slave_fields);
 $api->dbh->do("DELETE FROM $table WHERE in_update = 1");
 
-sub process_master {
-    my $file = shift;
-
-    print "Going to process '$file'" if $opt{'verbose'};
-
-    open my $fh, '<:encoding(cp1251)', $file
-        or die "Couldn't open $file";
-    
-    while ( my $str = <$fh> ) {
-        chomp $str;
-
-        my %rec;
-        @rec{qw(istart iend block country city region federal_district status)}
-            = split /\t/, $str;
-        delete $rec{'country'};
-
-        my $res = update( \%rec );
-    }
-    close $fh;
+sub process_leading {
+    my ($file, $fields) = @_;
+    $api->process_file(
+        $file,
+        fields => $fields,
+        callback => \&update_stashing,
+    );
+    finalize_stash();
+    finalize_joining();
 }
 
-sub process_coordinates {
-    my $file = shift;
+sub process_suplimentary { return; }
 
-    print "Going to process '$file'" if $opt{'verbose'};
-
-    open my $fh, '<:encoding(cp1251)', $file
-        or die "Couldn't open $file";
+{
+my ($proc_stash, $stash_start, $stash_end, @stash) = ();
+sub update_stashing {
+    my $rec = shift;
     
-    while ( my $str = <$fh> ) {
-        chomp $str;
-
-        my %rec;
-        @rec{qw(block istart iend city region federal_district latitude longitude)}
-            = split /\t/, $str;
-        my (@tmp) = delete @rec{qw(block city region federal_district)};
-
-        $api->update_record( %rec, in_update => 0 );
+    unless ( @stash ) {
+        ($proc_stash, $stash_start, $stash_end, @stash)
+            = (0, $rec->{'istart'}, $rec->{'iend'}, $rec);
+        return;
     }
-    close $fh;
+
+    if ( $rec->{'istart'} <= $stash_end
+        && $rec->{'iend'} >= $stash_start
+    ) {
+        $proc_stash = 1 if !$proc_stash
+            && !are_equal($stash[-1], $rec, \@equality_fields );
+        push @stash, $rec;
+        $stash_start = $rec->{'istart'} if $rec->{'istart'} < $stash_start;
+        $stash_end   = $rec->{'iend'}   if $rec->{'iend'}   > $stash_end;
+        return;
+    }
+
+    finalize_stash();
+
+    ($proc_stash, $stash_start, $stash_end, @stash)
+        = (0, $rec->{'istart'}, $rec->{'iend'}, $rec);
+}
+
+sub finalize_stash {
+    if ( @stash > 1 ) {
+        dump_stash("Resoving conflicts in:") if $opt{'verbose'};
+        if ( $proc_stash ) {
+            process_stash();
+            join_equal( \@stash, \@equality_fields );
+        } else {
+            join_all( \@stash, \@equality_fields );
+        }
+        dump_stash("Result:") if $opt{'verbose'};
+    }
+
+    update_joining( $_ ) foreach @stash;
+}
+
+sub process_stash {
+    sort_by_size( \@stash );
+
+    my @res = ();
+    while ( my $low = shift @stash ) {
+        my $i = 0;
+        while ( $i < @stash ) {
+            my $e = $stash[$i];
+            unless ( $e->{'istart'} <= $low->{'iend'}
+                && $e->{'iend'} >= $low->{'istart'}
+            ) {
+                $i++; next;
+            }
+
+            my @tmp = substract( $e, $low );
+            splice @stash, $i, 1, @tmp;
+            $i += @tmp;
+        }
+        push @res, $low;
+    }
+    sort_by_start( \@res );
+    @stash = @res;
+    return;
+}
+
+sub dump_stash {
+    print $_[0], "\n";
+    foreach (@stash) {
+        print join "\t", '', @{$_}{qw(start end city longitude)};
+        print "\n";
+    }
+} }
+
+{ my $cache;
+sub update_joining {
+    my $rec = shift;
+    unless ( $cache ) {
+        $cache = $rec;
+        return;
+    }
+    
+    if ( are_equal( $cache, $rec, \@equality_fields ) ) {
+        if ( $cache->{'istart'} > $rec->{'istart'} ) {
+            $cache->{'start'}  = $rec->{'start'};
+            $cache->{'istart'} = $rec->{'istart'};
+        }
+        if ( $cache->{'iend'} < $rec->{'iend'} ) {
+            $cache->{'iend'} = $rec->{'iend'};
+            $cache->{'end'}  = $rec->{'end'};
+        }
+    }
+    else {
+        update_splitting($cache);
+        $cache = $rec;
+    }
+}
+sub finalize_joining {
+    update_splitting($cache);
+} }
+
+
+sub update_splitting {
+    my $rec = shift;
+
+    if ( $opt{'split'} && ($rec->{'iend'}-$rec->{'istart'}+1) > $opt{'split_size'} ) {
+        my $istart = $rec->{'istart'};
+        while ( $istart <= $rec->{'iend'} ) {
+            my $iend = $istart + $opt{'split_size'} - 1;
+            $iend = $rec->{'iend'} if $iend > $rec->{'iend'};
+            _process( {
+                %$rec,
+                istart => $istart, iend => $iend,
+                start => $api->int2ip($istart),
+                end => $api->int2ip($iend),
+            } );
+            $istart = $iend + 1;
+        }
+    }
+
+    update( $rec );
+}
+
+sub are_equal {
+    my ($left, $right, $fields) = @_;
+    foreach (@$fields) {
+        return 0 if $left->{$_} ne $right->{$_};
+    }
+    return 1;
+}
+
+sub join_equal {
+    my ($list, $fields) = @_;
+
+    my $i = 0;
+    while ( $i < (@$list - 1) ) {
+        unless ( are_equal( $list->[$i], $list->[$i+1], $fields ) ) {
+            $i++
+        } else {
+            $list->[$i]{'end'}  = $api->int2ip(
+                $list->[$i]{'iend'} = $list->[$i+1]{'iend'}
+            );
+            splice @$list, $i+1, 1;
+        }
+    }
+    return;
+}
+
+sub join_all {
+    my ($list) = @_;
+
+    my $max = 0;
+    foreach (@$list) {
+        $max = $_->{'iend'} if $max < $_->{'iend'};
+    }
+    $list->[0]{'end'} = $api->int2ip(
+        $list->[0]{'iend'} = $max
+    );
+    splice @$list, 1;
+}
+
+sub sort_by_size {
+    @{$_[0]} =
+        sort { $a->{'iend'}-$a->{'istart'} <=> $b->{'iend'}-$b->{'istart'} }
+        @{$_[0]};
+}
+
+sub sort_by_start {
+    @{$_[0]} = sort {$a->{'istart'} <=> $b->{'istart'}} @{$_[0]};
+}
+
+sub substract {
+    my ($from, $what) = @_;
+
+    if ( $what->{'istart'} <= $from->{'istart'} ) {
+        if ( $what->{'iend'} < $from->{'iend'} ) {
+            return {
+                %$from,
+                istart => $what->{'iend'}+1,
+                start => $api->int2ip( $what->{'iend'}+1 ),
+            };
+        } else {
+            return ();
+        }
+    }
+    elsif ( $what->{'iend'} >= $from->{'iend'} ) {
+        return {
+            %$from,
+            iend => $what->{'istart'}-1,
+            end => $api->int2ip( $what->{'istart'}-1 ),
+        };
+    } else {
+        return {
+            %$from,
+            iend => $what->{'istart'}-1,
+            end => $api->int2ip( $what->{'istart'}-1 ),
+        },
+        {
+            %$from,
+            istart => $what->{'iend'}+1,
+            start => $api->int2ip( $what->{'iend'}+1 ),
+        };
+    }
 }
 
 sub update {
     my $rec = shift;
-
-    @{$rec}{'start', 'end'} = split_block( delete $rec->{'block'} )
-        if $rec->{'block'};
 
     if ( $opt{'create'} ) {
         print "Inserting block $rec->{start} - $rec->{end}\n" if $opt{'verbose'};
@@ -179,8 +362,6 @@ sub update {
     }
 }
 
-sub split_block { return split /\s*-\s*/, $_[0], 2; }
-
 
 exit 0;
 
@@ -194,7 +375,6 @@ sub fetch {
     }
     my $master = File::Spec->catfile( tmp_dir(), 'cidr_ru_master_index.db' );
     my $slave = File::Spec->catfile( tmp_dir(), 'cidr_ru_slave_index.db' );
-    return ($master, $slave) unless $opt{'coordinates'};
 
     @files = extract( fetch_file( $url{'coordinates'} ) );
     unless ( grep $_ eq 'block_coord.db', @files ) {
