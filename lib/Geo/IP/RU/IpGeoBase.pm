@@ -76,7 +76,7 @@ sub init {
         $db->{'dbh'} = DBI->connect(
             $db->{'dsn'}, $db->{'user'}, $db->{'pass'},
             { RaiseError => 0, PrintError => 0 }
-        );
+        ) or die "Couldn't connect to the DB: ". DBI->errstr;
         $db->{'dbh'}->do("SET NAMES 'utf8'");
         $db->{'decode'} = 1;
     } else {
@@ -117,6 +117,7 @@ sub find_by_ip {
 }
 
 sub ip2int { return unpack 'N', pack 'C4', split /[.]/, $_[1] }
+sub int2ip { return join '.', unpack "C4", pack "N",    $_[1] }
 
 sub intersections {
     my $self = shift;
@@ -207,6 +208,33 @@ sub decode {
     return $value;
 }
 
+sub process_file {
+    my $self = shift;
+    my %args = (@_%2? (path => @_) : @_);
+
+    my $file   = $args{'path'};
+    my @fields = @{ $args{'fields'} };
+
+    open my $fh, '<:encoding(cp1251)', $file
+        or die "Couldn't open $file";
+
+    while ( my $str = <$fh> ) {
+        chomp $str;
+
+        my %rec;
+        @rec{ @fields } = split /\t/, $str;
+        delete $rec{'country'};
+        @rec{'start', 'end'} = $self->split_block( delete $rec{'block'} )
+            if exists $rec{'block'};
+
+        $args{'callback'}->( \%rec );
+    }
+    close $fh;
+}
+
+sub split_block { return split /\s*-\s*/, $_[1], 2; }
+
+
 sub db_info { return $_[0]->{'db'} }
 
 sub dbh { return $_[0]->{'db'}{'dbh'} }
@@ -233,7 +261,6 @@ CREATE TABLE $table (
     iend INTEGER NOT NULL,
     start TEXT NOT NULL,
     end TEXT NOT NULL,
-    status TEXT,
     city TEXT,
     region TEXT,
     federal_district TEXT,
@@ -256,7 +283,6 @@ CREATE TABLE $table (
     iend INTEGER UNSIGNED NOT NULL,
     start VARCHAR(15) NOT NULL,
     end VARCHAR(15) NOT NULL,
-    status VARCHAR(64),
     city TEXT,
     region TEXT,
     federal_district TEXT,
@@ -280,7 +306,6 @@ CREATE TABLE $table (
     iend BIGINT NOT NULL,
     start VARCHAR(15) NOT NULL,
     $endq VARCHAR(15) NOT NULL,
-    status VARCHAR(64),
     city TEXT,
     region TEXT,
     federal_district TEXT,
