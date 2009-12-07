@@ -99,7 +99,6 @@ if ( $opt{'split'} ) {
     $opt{'split_size'} = $size;
 }
 
-use Data::Dumper;
 require File::Spec;
 
 require Geo::IP::RU::IpGeoBase;
