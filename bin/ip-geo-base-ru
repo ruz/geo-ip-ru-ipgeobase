@@ -351,15 +351,15 @@ sub update {
     my $rec = shift;
 
     if ( $opt{'create'} ) {
-        print "Inserting block $rec->{start} - $rec->{end}\n" if $opt{'verbose'};
+        print "Inserting block $rec->{start} - $rec->{end} ($rec->{city}, $rec->{longitude})\n" if $opt{'verbose'};
         return $api->insert_record( %$rec, in_update => 0 );
     }
     elsif ( $api->fetch_record( $rec->{'istart'}, $rec->{'iend'} ) ) {
-        print "Updating block $rec->{start} - $rec->{end}\n" if $opt{'verbose'};
+        print "Updating block $rec->{start} - $rec->{end}  ($rec->{city}, $rec->{longitude})\n" if $opt{'verbose'};
         return $api->update_record( %$rec, in_update => 0 );
     }
     else {
-        print "Inserting block $rec->{start} - $rec->{end}\n" if $opt{'verbose'};
+        print "Inserting block $rec->{start} - $rec->{end} ($rec->{city}, $rec->{longitude})\n" if $opt{'verbose'};
         return $api->insert_record( %$rec, in_update => 0 );
     }
 }
