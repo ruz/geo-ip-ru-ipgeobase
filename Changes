@@ -1,3 +1,7 @@
+0.03 2010-02-04
+
+    * join only intersecting or touching blocks
+
 0.02 2009-12-07
 
     * solve conflicts in the DB file
