@@ -220,8 +220,11 @@ sub update_joining {
         $cache = $rec;
         return;
     }
-    
-    if ( are_equal( $cache, $rec, \@equality_fields ) ) {
+
+    if ( $cache->{'istart'}-1 <= $rec->{'iend'}
+        && $cache->{'iend'}+1 >= $rec->{'istart'}
+        && are_equal( $cache, $rec, \@equality_fields )
+    ) {
         if ( $cache->{'istart'} > $rec->{'istart'} ) {
             $cache->{'start'}  = $rec->{'start'};
             $cache->{'istart'} = $rec->{'istart'};
